@@ -7,6 +7,7 @@ interface LogEntry {
 }
 
 export class DB {
+  private ts: number;   //timestamp for logs
   private db: Database;
   private logs: LogEntry[];
 
@@ -14,11 +15,12 @@ export class DB {
   private constructor(SQL: initSqlJs.SqlJsStatic) {
     this.db = new SQL.Database(); // Create a new SQLite database in memory
     this.logs = [];           // Initialize the logs array
+    this.ts = 0;
   }
 
   // Open a database (creates an empty database in memory for this example)
   static async openDB(): Promise<DB> {
-    const SQL = await initSqlJs();
+    const SQL = await initSqlJs({ locateFile: file => `https://sql.js.org/dist/${file}` });
     const instance = new DB(SQL);
     return instance;
   }
@@ -29,9 +31,8 @@ export class DB {
     const results = this.db.exec(stmt);
     if (results.length === 0) return [];
 
-    // Log the operation
     this.logs.push({
-      timestamp: Date.now(),
+      timestamp: this.ts++,
       operation: 'exec',
       sql: stmt
     });
@@ -52,50 +53,22 @@ export class DB {
     const SQL = await initSqlJs();
     const newDB = new SQL.Database(new Uint8Array(dump.split('').map(c => c.charCodeAt(0))));
     this.db = newDB;
-
-    // Optionally, you might need to load logs if you have them in the dump
-  }
-
-  // Merge another database dump into this one
-  async merge(dump: string): Promise<void> {
-    if (!this.db) throw new Error('Database not initialized');
-    const SQL = await initSqlJs();
-    const tempDB = new SQL.Database(new Uint8Array(dump.split('').map(c => c.charCodeAt(0))));
-
-    // Attach the temporary database to the current one
-    this.db.run('ATTACH DATABASE ":memory:" AS temp_db');
-    this.db.run('CREATE TABLE IF NOT EXISTS temp_db.sqlite_master AS SELECT * FROM temp_db.sqlite_master');
-    this.db.run('INSERT INTO temp_db.sqlite_master SELECT * FROM temp_db.sqlite_master');
-
-    // Merge tables from temp_db to the main database
-    const tables = tempDB.exec('SELECT name FROM sqlite_master WHERE type="table";');
-    for (const table of tables[0].values) {
-      const tableName = table[0];
-      this.db.run(`ATTACH DATABASE ":memory:" AS temp_db`);
-      this.db.run(`CREATE TABLE IF NOT EXISTS ${tableName} AS SELECT * FROM temp_db.${tableName}`);
-      this.db.run(`INSERT INTO ${tableName} SELECT * FROM temp_db.${tableName}`);
-    }
-    this.db.run('DETACH DATABASE temp_db');
   }
 
   // Get the current logs
-  getLogs(): LogEntry[] {
-    return this.logs;
-  }
+  getLogs(): LogEntry[] { return this.logs; }
 
   // Sync with another database using logs
+  // assume the differences only appears at the end of logs
   async syncWith(otherLogs: LogEntry[]): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
-
-    // Compare logs
     const myLogs = this.getLogs();
+    const latest_other = Math.max(...otherLogs.map(item => item.timestamp))
+    const latest_my = Math.max(...myLogs.map(item => item.timestamp))
 
-    // Find new operations in the other database that are not in the current one
-    const newLogs = otherLogs.filter(log => !myLogs.some(myLog => myLog.timestamp === log.timestamp && myLog.sql === log.sql));
-
-    // Apply new operations
-    for (const log of newLogs) {
-      await this.exec(log.sql);
+    if (latest_other > latest_my) for (const log of otherLogs) {
+      if (log.timestamp > latest_my)
+        await this.exec(log.sql);
     }
   }
 }

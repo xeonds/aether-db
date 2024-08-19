@@ -1,176 +1,62 @@
 <template>
   <div>
     <h1>Distributed Database Demo</h1>
-    <button @click="insertData">Insert Data</button>
-    <button @click="queryData">Query Data</button>
-    <button @click="deleteData">Delete Data</button>
-    <button @click="updateData">Update Data</button>
+    <pre>Client ID: {{ client_id }}</pre>
+    <button @click="exec(`INSERT INTO test VALUES(1, '2', 'test_value');`, peers)">Insert Data</button>
+    <button @click="exec('UPDATE test SET id=id+1;', peers)">Update Data</button>
+    <button @click="getPeers()">Refresh Peers</button>
     <div v-if="output.length > 0">
-      <strong>Data:</strong>
-      <div v-for="(item, index) in output" :key="index">{{ item }}</div>
+      <div style="display:flex;flex-flow: row;">
+        <div>
+          <strong>Peers</strong>
+          <template v-if="peers.size > 0">
+            <div v-for="(item, index) in peers">{{ `${item}-${index}` }}</div>
+          </template>
+          <p v-else>无节点</p>
+        </div>
+        <div>
+          <strong>Data</strong>
+          <div v-for="(item, index) in output" :key="index">{{ item }}</div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue';
+import { Rtc } from './lib/rtc';
+import { DB } from './lib/db';
 
-const socket = new WebSocket('wss://improved-engine-9w5wxjvq7v4cp7g9-8080.app.github.dev/ws');
-
+const rtc = ref<Rtc>();
+const db = ref<DB>();
 const output = ref<string[]>([]);
-const localData = ref<any[]>([]);
-const peers = ref<RTCPeerConnection[]>([]);
-let peerConnection: RTCPeerConnection | null = null;
+const client_id = ref('');
 
-const handleDatabaseOperation = (data: any) => {
-  if (data.type === 'data') {
-    localData.value.push(data.data);
-  } else if (data.type === 'delete') {
-    localData.value = localData.value.filter(item => !item.match(data.query));
-  } else if (data.type === 'update') {
-    localData.value = localData.value.map(item => item.match(data.query) ? data.data : item);
-  }
-  updateOutput();
+const peers = ref<Map<string, RTCPeerConnection>>(new Map())
+const getPeers = async() => peers.value = rtc.value!.getPeers()
+
+const exec = async (sql: string, peers: Map<string, RTCPeerConnection>) => {
+  Promise
+    .all(Array.from(peers).filter(item => item[0] != client_id.value).map(item => rtc.value!.sendToPeer(item[0], { type: 'sql', sql })))
+    .then(async results => {
+      if (results.length >= peers.size / 2) {
+        db.value?.exec(sql)
+        const res = await db.value?.exec('SELECT * FROM test;');
+        output.value = res!;
+      } else {
+        console.log('Operation failed: majority not reached');
+      }
+    });
 };
 
-const updateOutput = () => {
-  output.value = localData.value;
-};
-
-const configuration: RTCConfiguration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-const createPeerConnection = () => {
-  peerConnection = new RTCPeerConnection(configuration);
-  peerConnection.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
-    if (event.candidate) {
-      socket.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
-    }
-  };
-
-  peerConnection.ondatachannel = (event: RTCDataChannelEvent) => {
-    const receiveChannel = event.channel;
-    receiveChannel.onmessage = (event: MessageEvent) => {
-      handleDatabaseOperation(JSON.parse(event.data as string));
-    };
-  };
-
-  const dataChannel = peerConnection.createDataChannel('database');
-  dataChannel.onopen = () => console.log('Data channel open');
-  dataChannel.onmessage = (event: MessageEvent) => {
-    handleDatabaseOperation(JSON.parse(event.data as string));
-  };
-};
-
-const handleOffer = async (offer: RTCSessionDescriptionInit) => {
-  if (peerConnection) {
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    socket.send(JSON.stringify({ type: 'answer', answer: answer }));
-  }
-};
-
-const handleAnswer = async (answer: RTCSessionDescriptionInit) => {
-  if (peerConnection) {
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-  }
-};
-
-socket.onopen = () => console.log('Connected to the server');
-socket.onerror = (error: Event) => console.error('WebSocket error:', error);
-socket.onclose = () => console.log('Connection closed');
-
-socket.onmessage = (event: MessageEvent) => {
-  const message = JSON.parse(event.data as string);
-  if (message.type === 'candidate') {
-    if (peerConnection) {
-      peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-    }
-  } else if (message.type === 'offer') {
-    handleOffer(message.offer);
-  } else if (message.type === 'answer') {
-    handleAnswer(message.answer);
-  } else if (message.type === 'data') {
-    handleDatabaseOperation(message.data);
-  }
-};
-
-const sendToPeer = (peer: RTCPeerConnection, message: any) => {
-  return new Promise((resolve, reject) => {
-    const dataChannel = peer.createDataChannel('database');
-    dataChannel.send(JSON.stringify(message));
-    dataChannel.onmessage = (event: MessageEvent) => {
-      resolve(JSON.parse(event.data as string));
-    };
+onMounted(async () => {
+  db.value = await DB.openDB();
+  client_id.value = Math.random().toString();
+  rtc.value = new Rtc('wss://improved-engine-9w5wxjvq7v4cp7g9-8080.app.github.dev/ws', client_id.value, (msg, peerId) => {
+    if (peerId == client_id.value) return;
+    if (msg.type == 'sql') db.value?.exec(msg.sql);
   });
-};
-
-const syncDatabase = () => {
-  // Placeholder for synchronization logic
-};
-
-const select = (query: string) => {
-  syncDatabase();
-  return localData.value.filter(item => item.match(query));
-};
-
-const insert = (data: any) => {
-  const promises = peers.value.map(peer => sendToPeer(peer, { type: 'data', data }));
-  Promise.all(promises).then(results => {
-    if (results.length > peers.value.length / 2) {
-      localData.value.push(data);
-      updateOutput();
-    } else {
-      console.log('Insert failed: majority not reached');
-    }
-  });
-};
-
-const deleteOperation = (query: string) => {
-  const promises = peers.value.map(peer => sendToPeer(peer, { type: 'delete', query }));
-  Promise.all(promises).then(results => {
-    if (results.length > peers.value.length / 2) {
-      localData.value = localData.value.filter(item => !item.match(query));
-      updateOutput();
-    } else {
-      console.log('Delete failed: majority not reached');
-    }
-  });
-};
-
-const updateOperation = (query: string, data: any) => {
-  const promises = peers.value.map(peer => sendToPeer(peer, { type: 'update', query, data }));
-  Promise.all(promises).then(results => {
-    if (results.length > peers.value.length / 2) {
-      localData.value = localData.value.map(item => item.match(query) ? data : item);
-      updateOutput();
-    } else {
-      console.log('Update failed: majority not reached');
-    }
-  });
-};
-
-const insertData = () => {
-  const data = `Data ${new Date().toISOString()}`;
-  insert(data);
-};
-
-const queryData = () => {
-  // For example query to select all data
-  console.log(select(''));
-};
-
-const deleteData = () => {
-  const query = 'some query'; // Define your query logic
-  deleteOperation(query);
-};
-
-const updateData = () => {
-  const query = 'some query'; // Define your query logic
-  const data = `Updated Data ${new Date().toISOString()}`;
-  updateOperation(query, data);
-};
-
-onMounted(() => {
-  createPeerConnection();
+  await exec('CREATE TABLE test(id INT, name STRING, value STRING);', rtc.value!.getPeers())
 });
 </script>

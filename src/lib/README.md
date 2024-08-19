@@ -1,4 +1,4 @@
-## db.js
+## db.ts
 
 API wrapped for sql.js
 
@@ -38,6 +38,27 @@ API wrapped for sql.js
 })();
 ```
 
-## n-raft
+## rtc.ts
 
 Protocol for synchronize data in unstable cluster
+
+```js
+// app.ts
+import { Rtc, sendToPeer } from './rtc';
+
+const wsUrl = 'ws://localhost:8080';
+
+const client = new Rtc(wsUrl, localId, (msg, peerId)=>{
+  console.log(msg, peerId);
+});
+const peers = client.getPeers()
+Promise.all(peers.map(peer=>sendToPeer(peer, {type: 'message', data: 'data'})))
+  .then(results=>{
+    if(results.length < peers.length) {
+      console.log('not ok')
+    } else {
+      console.log('seems ok')
+      // do something
+    }
+  })
+```
